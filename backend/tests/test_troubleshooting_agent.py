@@ -1,5 +1,4 @@
-
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import sys
 import os
 import asyncio
@@ -16,18 +15,25 @@ def test_troubleshooting_agent_logic():
             res = await diagnose_and_propose(
                 context_chunks=[],
                 history=[],
-                last_message="I have error E105 on my X100"
+                last_message="I have error E105 on my X100",
             )
             assert res["decision"] == "QUESTION"
             assert "fan" in res["text"].lower()
 
             # Test action advice when history shows user answered "no"
-            history = [{"question": "Is the cooling fan spinning at all?", "answer": "No"}]
+            history = [
+                {
+                    "question": "Is the cooling fan spinning at all?",
+                    "answer": "No",
+                }
+            ]
+
             res2 = await diagnose_and_propose(
                 context_chunks=[],
                 history=history,
-                last_message="No"
+                last_message="No",
             )
+
             assert res2["decision"] == "ACTION"
             assert "rear panel" in res2["text"].lower()
 
