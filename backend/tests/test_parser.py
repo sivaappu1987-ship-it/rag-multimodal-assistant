@@ -1,12 +1,11 @@
+# ruff: noqa: E402
+
 import sys
-from unittest.mock import MagicMock
+import os
+from unittest.mock import MagicMock, patch
 
 # Mock markitdown first
 sys.modules["markitdown"] = MagicMock()
-
-import pytest
-from unittest.mock import patch
-import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -20,7 +19,9 @@ from app.services.parser import ParserService
 def test_parser_service(mock_identify, mock_vs, mock_emb, mock_mid):
     # Setup mocks
     mock_mid_instance = MagicMock()
-    mock_mid_instance.convert.return_value.text_content = "Manual page details for printer device X100 showing Error E105."
+    mock_mid_instance.convert.return_value.text_content = (
+        "Manual page details for printer device X100 showing Error E105."
+    )
     mock_mid.return_value = mock_mid_instance
 
     mock_emb_instance = MagicMock()
