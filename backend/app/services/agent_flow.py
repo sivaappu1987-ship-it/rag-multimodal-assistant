@@ -130,7 +130,7 @@ def version_check(state: AgentState) -> Dict[str, Any]:
     filename = state["source_input"]
     md_content = state["source_content"].decode("utf-8")
 
-    md5_hash = hashlib.md5(md_content.encode("utf-8")).hexdigest()
+    md5_hash = hashlib.md5(md_content.encode("utf-8"), usedforsecurity=False).hexdigest()
 
     conn = sqlite3.connect(REGISTRY_DB_PATH)
     cursor = conn.cursor()
