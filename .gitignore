@@ -68,5 +68,6 @@ test_agent.py
 docker_setup.md
 
 # Large package wheels (locally cached)
-backend/wheels/
+backend/wheels/*
+!backend/wheels/.gitkeep
 backend/test_wheels/
