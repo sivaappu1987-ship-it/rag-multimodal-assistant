@@ -13,10 +13,7 @@ from typing import TypedDict, Optional, List, Dict, Any, Literal
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, Filter, FieldCondition, MatchValue
-
-from app.config import settings, BASE_DIR
+from app.config import settings
 from app.services.product_identifier import identify_product as identify_product_service
 from app.services.chunker import chunk_markdown
 from app.services.embedder import EmbedderService
@@ -71,30 +68,30 @@ def url_ingest(state: AgentState) -> Dict[str, Any]:
         html_content = response.text
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to scrape URL {url}: {str(e)}")
-        
+
     soup = BeautifulSoup(html_content, "html.parser")
     title = soup.title.string.strip() if soup.title else "Scraped Webpage"
-    
+
     # Remove script and style elements
     for script in soup(["script", "style"]):
         script.extract()
-        
+
     text = soup.get_text()
     lines = (line.strip() for line in text.splitlines())
     chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
     text_content = "\n".join(chunk for chunk in chunks if chunk)
-    
+
     markdown_content = f"# {title}\n\nSource URL: {url}\n\n{text_content}"
-    
+
     # Generate clean filename
     safe_slug = re.sub(r'[^a-zA-Z0-9]', '_', url.replace("https://", "").replace("http://", ""))[:50]
     filename = f"url_{safe_slug}.txt"
-    
+
     input_dir = str(settings.INPUT_DIR)
     raw_path = os.path.join(input_dir, filename)
     with open(raw_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
-        
+
     return {
         "source_input": filename,
         "source_content": markdown_content.encode("utf-8")
@@ -104,27 +101,27 @@ def file_ingest(state: AgentState) -> Dict[str, Any]:
     filename = os.path.basename(state["source_input"])
     input_dir = str(settings.INPUT_DIR)
     raw_path = os.path.join(input_dir, filename)
-    
+
     if state.get("source_content"):
         with open(raw_path, "wb") as f:
             f.write(state["source_content"])
     elif not os.path.exists(raw_path):
         raise FileNotFoundError(f"File not found at: {raw_path}")
-        
+
     # Convert with MarkItDown
     print(f"[AgentFlow] Converting file to markdown: {filename}")
     from markitdown import MarkItDown
     markitdown = MarkItDown()
     result = markitdown.convert(raw_path)
     md_content = result.text_content
-    
+
     output_dir = str(settings.OUTPUT_DIR)
     base_name, _ = os.path.splitext(filename)
     md_filename = f"{base_name}.md"
     md_path = os.path.join(output_dir, md_filename)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_content)
-        
+
     return {
         "source_content": md_content.encode("utf-8")
     }
@@ -132,17 +129,17 @@ def file_ingest(state: AgentState) -> Dict[str, Any]:
 def version_check(state: AgentState) -> Dict[str, Any]:
     filename = state["source_input"]
     md_content = state["source_content"].decode("utf-8")
-    
+
     md5_hash = hashlib.md5(md_content.encode("utf-8")).hexdigest()
-    
+
     conn = sqlite3.connect(REGISTRY_DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT hash, version FROM registry WHERE filepath = ?", (filename,))
     row = cursor.fetchone()
-    
+
     content_changed = True
     version = 1
-    
+
     if row:
         db_hash, db_version = row
         if db_hash == md5_hash:
@@ -157,13 +154,13 @@ def version_check(state: AgentState) -> Dict[str, Any]:
         cursor.execute("INSERT INTO registry (filepath, hash, version) VALUES (?, ?, ?)", 
                        (filename, md5_hash, version))
         conn.commit()
-        
+
     conn.close()
-    
+
     version_status = "unchanged" if not content_changed else ("updated" if version > 1 else "created")
     version_info = f"{filename} (v{version}) - {version_status}"
     print(f"[AgentFlow] Version check: {version_info}")
-    
+
     return {
         "content_changed": content_changed,
         "version_info": version_info
@@ -172,22 +169,22 @@ def version_check(state: AgentState) -> Dict[str, Any]:
 def embed_and_store(state: AgentState) -> Dict[str, Any]:
     filename = state["source_input"]
     md_content = state["source_content"].decode("utf-8")
-    
+
     sample_text = md_content[:1500]
     metadata = identify_product_service(f"File: {filename}\n{sample_text}")
-    
+
     chunks = chunk_markdown(md_content, source_file=filename, metadata=metadata)
-    
+
     embedder = EmbedderService()
     texts = [chunk["content"] for chunk in chunks]
     embeddings = embedder.embed_batch(texts)
     for chunk, embedding in zip(chunks, embeddings):
         chunk["embedding"] = embedding
-        
+
     vs = VectorStoreService()
     vs.delete_by_filename(filename)
     vs.ingest_chunks(chunks)
-    
+
     print(f"[AgentFlow] Re-embedded and stored {len(chunks)} chunks for {filename}.")
     return {}
 
@@ -195,13 +192,13 @@ def identify_product(state: AgentState) -> Dict[str, Any]:
     query = state["query"]
     vs = VectorStoreService()
     existing_products = vs.get_unique_products()
-    
+
     if not existing_products:
         return {"product_id": None, "clarification_needed": False}
-        
+
     extracted = identify_product_service(query)
     extracted_product = extracted.get("product")
-    
+
     if extracted_product:
         matches = [p for p in existing_products if extracted_product.upper() in p.upper() or p.upper() in extracted_product.upper()]
         if len(matches) == 1:
@@ -214,7 +211,7 @@ def identify_product(state: AgentState) -> Dict[str, Any]:
                 "clarification_needed": True, 
                 "clarification_options": matches
             }
-            
+
     # Fuzzy match product names directly in the query text
     matches = [p for p in existing_products if p.lower() in query.lower()]
     if len(matches) == 1:
@@ -227,26 +224,26 @@ def identify_product(state: AgentState) -> Dict[str, Any]:
             "clarification_needed": True, 
             "clarification_options": matches
         }
-        
+
     if len(existing_products) == 1:
         print(f"[AgentFlow] Defaulting to single existing product: {existing_products[0]}")
         return {"product_id": existing_products[0], "clarification_needed": False}
-        
+
     return {"product_id": None, "clarification_needed": False}
 
 def classify_mode(state: AgentState) -> Dict[str, Any]:
     query = state["query"].lower()
-    
+
     trouble_keywords = ["error", "fail", "broken", "troubleshoot", "won't", "diagnose", "fix", "issue", "problem", "fault"]
     has_error_code = bool(re.search(r"\b(e\d{3})\b", query))
-    
+
     if has_error_code or any(k in query for k in trouble_keywords):
         print("[AgentFlow] Keyword classifier: troubleshoot mode.")
         return {"mode": "troubleshoot"}
-        
+
     from app.config import settings
     from app.main import call_llm
-    
+
     if settings.LLM_PROVIDER != "none":
         prompt = f"""Classify the user's technical support query.
 Query: "{state["query"]}"
@@ -258,19 +255,19 @@ Respond with either 'troubleshoot' (if reporting a problem, error, or failure) o
             return {"mode": mode}
         except Exception as e:
             print(f"[AgentFlow] LLM classifier failed: {str(e)}. Defaulting to qa.")
-            
+
     return {"mode": "qa"}
 
 def retrieve(state: AgentState) -> Dict[str, Any]:
     query = state["query"]
     product_id = state["product_id"]
-    
+
     query_entities = {}
     if product_id:
         query_entities = {"product": product_id, "model": product_id}
-        
+
     chunks = retrieve_context_service(query, query_entities=query_entities)
-    
+
     sources = []
     for c in chunks:
         sources.append({
@@ -278,7 +275,7 @@ def retrieve(state: AgentState) -> Dict[str, Any]:
             "page": c.get("page"),
             "product": c.get("product")
         })
-        
+
     unique_sources = []
     seen = set()
     for s in sources:
@@ -286,7 +283,7 @@ def retrieve(state: AgentState) -> Dict[str, Any]:
         if key not in seen:
             seen.add(key)
             unique_sources.append(s)
-            
+
     return {
         "retrieved_chunks": chunks,
         "sources": unique_sources
@@ -296,13 +293,13 @@ def generate(state: AgentState) -> Dict[str, Any]:
     chunks = state["retrieved_chunks"]
     query = state["query"]
     mode = state["mode"]
-    
+
     if not chunks:
         return {"answer": "I could not find that information in the uploaded manuals."}
-        
+
     context_str = "\n\n".join([f"--- Source: {c['source']} (Page {c.get('page')}) ---\n{c['content']}" for c in chunks])
     from app.main import call_llm
-    
+
     if mode == "qa":
         prompt = f"""You are a technical support assistant. Answer the user's question using only the provided context. If the answer cannot be found in the context, say "I could not find that information in the uploaded manuals."
 Context:
@@ -331,7 +328,7 @@ Context:
 User Query: {query}"""
         response_text = call_llm(prompt)
         cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
-        
+
         try:
             data = json.loads(cleaned_text)
             return {
@@ -352,7 +349,7 @@ def format_response(state: AgentState) -> Dict[str, Any]:
             "sources": [],
             "clarification_needed": True
         }
-        
+
     return {
         "answer": state["answer"],
         "steps": state.get("steps") or [],
@@ -388,7 +385,7 @@ def product_router(state: AgentState) -> str:
 
 def build_agent_graph():
     workflow = StateGraph(AgentState)
-    
+
     workflow.add_node("url_ingest", url_ingest)
     workflow.add_node("file_ingest", file_ingest)
     workflow.add_node("version_check", version_check)
@@ -398,7 +395,7 @@ def build_agent_graph():
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("generate", generate)
     workflow.add_node("format_response", format_response)
-    
+
     workflow.set_conditional_entry_point(
         ingest_router,
         {
@@ -407,10 +404,10 @@ def build_agent_graph():
             "identify_product": "identify_product"
         }
     )
-    
+
     workflow.add_edge("url_ingest", "version_check")
     workflow.add_edge("file_ingest", "version_check")
-    
+
     workflow.add_conditional_edges(
         "version_check",
         version_router,
@@ -419,9 +416,9 @@ def build_agent_graph():
             "identify_product": "identify_product"
         }
     )
-    
+
     workflow.add_edge("embed_and_store", "identify_product")
-    
+
     workflow.add_conditional_edges(
         "identify_product",
         product_router,
@@ -430,12 +427,12 @@ def build_agent_graph():
             "classify_mode": "classify_mode"
         }
     )
-    
+
     workflow.add_edge("classify_mode", "retrieve")
     workflow.add_edge("retrieve", "generate")
     workflow.add_edge("generate", "format_response")
     workflow.add_edge("format_response", END)
-    
+
     return workflow.compile()
 
 # Singleton graph instance
