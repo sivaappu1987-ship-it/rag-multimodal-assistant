@@ -77,3 +77,26 @@ def test_valid_upload():
     assert response.status_code == 200
     assert response.json()["filename"] == "manual.pdf"
     assert response.json()["status"] == "processed"
+
+
+def test_valid_ppt_xls_uploads():
+    app_main.parser_service.parse_file.return_value = {
+        "markdown_file": "manual.md",
+        "chunks_ingested": 3,
+    }
+
+    # PPT upload
+    response = client.post(
+        "/upload",
+        files={"file": ("manual.ppt", b"fake_ppt_bytes", "application/vnd.ms-powerpoint")},
+    )
+    assert response.status_code == 200
+    assert response.json()["filename"] == "manual.ppt"
+
+    # XLS upload
+    response = client.post(
+        "/upload",
+        files={"file": ("data.xls", b"fake_xls_bytes", "application/vnd.ms-excel")},
+    )
+    assert response.status_code == 200
+    assert response.json()["filename"] == "data.xls"

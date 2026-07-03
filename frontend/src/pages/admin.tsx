@@ -188,7 +188,7 @@ export default function Admin() {
                 <h3 className="text-md font-semibold text-slate-100">Ingest New Manuals</h3>
                 <p className="text-xs text-slate-400 mt-1">
                   Upload raw manuals to convert them to markdown using Microsoft MarkItDown.
-                  Supported formats: PDF, DOCX, PPTX, XLSX, TXT.
+                  Supported formats: PDF, DOCX, PPT/PPTX, XLS/XLSX, TXT.
                 </p>
               </div>
 
@@ -208,7 +208,7 @@ export default function Admin() {
                   type="file"
                   ref={fileInputRef}
                   onChange={handleFileChange}
-                  accept=".pdf,.docx,.pptx,.xlsx,.txt"
+                  accept=".pdf,.docx,.ppt,.pptx,.xls,.xlsx,.txt"
                   className="hidden"
                 />
                 <div className="p-4 bg-slate-900 rounded-2xl border border-slate-800 shadow-sm text-slate-400 mb-4">
@@ -217,7 +217,7 @@ export default function Admin() {
                 <p className="text-sm font-medium text-slate-200 text-center">
                   Drag and drop your document here, or <span className="text-violet-400 hover:text-violet-300 underline">browse</span>
                 </p>
-                <p className="text-[10px] text-slate-500 mt-1.5">Max size 25MB. PDF, DOCX, PPTX, XLSX, TXT</p>
+                <p className="text-[10px] text-slate-500 mt-1.5">Max size 25MB. PDF, DOCX, PPT/PPTX, XLS/XLSX, TXT</p>
               </div>
 
               {/* Selected File Details */}

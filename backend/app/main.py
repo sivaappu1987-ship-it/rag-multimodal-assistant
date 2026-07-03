@@ -210,7 +210,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         )
 
     # Validate file extension
-    allowed_extensions = {".pdf", ".docx", ".pptx", ".xlsx", ".txt"}
+    allowed_extensions = {".pdf", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".txt"}
     import os
     _, ext = os.path.splitext(file.filename.lower())
     if ext not in allowed_extensions:
@@ -226,6 +226,8 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.ms-excel",
         "text/plain"
     }
     if file.content_type not in allowed_mime_types:
