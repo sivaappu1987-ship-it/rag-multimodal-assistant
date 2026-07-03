@@ -10,6 +10,7 @@ A production-ready **Multimodal Retrieval-Augmented Generation (RAG) Assistant**
 * **🔍 Hierarchical Hybrid Search**: Searches Qdrant using a 3-level priority hierarchy (Exact Match -> Family Match -> Global Match) combining dense (MiniLM-L6) and sparse (BM25) candidates using **Reciprocal Rank Fusion (RRF)**.
 * **🎙️ Hybrid Voice Layer**: Captures audio input and routes transcription based on language hint (local Whisper for English; remote Sarvam AI Saaras v3 API for Indic languages). Synthesizes speech outputs using **edge-tts** with Microsoft Neural voices.
 * **🤖 Agentic Troubleshooting Engine**: Guides users through diagnostic trees tracking session parameters, history, and RAG context blocks across turns.
+* **🦜 Unified Agentic Ingestion & Retrieval**: Uses LangGraph `StateGraph` to scrap URLs (BeautifulSoup), cache versions via SQLite file hashes, resolve fuzzy product IDs, classify queries (`qa` vs. `troubleshoot`), and generate troubleshooting steps through a single `POST /agent/run` API.
 * **🛡️ Security & Hardening**:
   * **Rate Limiting**: Integrated `slowapi` rate limits on all major endpoints.
   * **File Upload Guard**: Restricts upload sizes to `<= 25MB` and validates file MIME types/extensions.
@@ -43,6 +44,7 @@ rag-multimodal-assistant/
 │           ├── retriever.py   # 3-level prioritized retriever
 │           ├── audio.py       # Speech Transcriber (Whisper/Sarvam) & TTS (edge-tts)
 │           ├── prompt_guard.py# Prompt injection filter
+│           ├── agent_flow.py  # LangGraph unified ingestion & RAG graph
 │           └── workflow_manager.py# Troubleshooting state machine
 └── frontend/                  # Next.js UI app codebase
 ```
@@ -89,4 +91,5 @@ cd backend
 * **Frontend UI**: http://localhost:3000
 * **Admin Upload Panel**: http://localhost:3000/admin
 * **Backend Docs / API**: http://localhost:8000/docs
+* **Unified Agent Flow**: `POST http://localhost:8000/agent/run`
 * **Health endpoint**: http://localhost:8000/health

@@ -190,6 +190,23 @@ class VectorStoreService:
         products = list(set(c["product"] for c in chunks if c.get("product")))
         return sorted(products)
 
+    def delete_by_filename(self, filename: str):
+        """Delete all points associated with a specific source filename from the Qdrant database."""
+        if not self._collection_ready:
+            return
+        self.client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="source_file",
+                        match=MatchValue(value=filename)
+                    )
+                ]
+            )
+        )
+        print(f"[VectorStore] Deleted existing chunks for file: {filename}")
+
     def count(self) -> int:
         """Return total number of vectors stored."""
         if not self._collection_ready:

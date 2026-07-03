@@ -148,4 +148,54 @@ graph LR
     C -->|Check Text Size| D[Prompt Guard: Injection detection]
     D -->|Check override patterns| E[Context-Isolated Prompt Builder]
     E -->|Execute RAG| F[LLM Generation]
+
+---
+
+## 6. Unified Agentic Ingestion + Retrieval Flow (LangGraph)
+
+For ad-hoc queries combining ingestion and retrieval, the system routes tasks through a bounded **LangGraph `StateGraph`** with conditional routing decisions. This enables LLM-driven path routing (e.g. asking for clarification on product name ambiguity) while maintaining deterministic processing node boundaries.
+
+```mermaid
+graph TD
+    Start([Start Route]) --> Router{Ingest Router}
+    
+    Router -->|URL input| URL[url_ingest: Scraping BS4]
+    Router -->|File input| File[file_ingest: MarkItDown Parse]
+    Router -->|No Ingestion input| ID[identify_product: Product Matching]
+    
+    URL --> VC[version_check: Hash matching SQLite]
+    File --> VC
+    
+    VC -->|Hash Changed| Embed[embed_and_store: Chunk & Index Qdrant]
+    VC -->|Hash Unchanged| ID
+    Embed --> ID
+    
+    ID -->|Ambiguous Product| Format[format_response: Clarification Ask]
+    ID -->|Resolved Product| Classify[classify_mode: QA vs. Troubleshoot]
+    
+    Classify --> Retrieve[retrieve: RRF Hybrid Retrieval]
+    Retrieve --> Gen[generate: QA / Structured JSON Steps]
+    Gen --> Format
+    
+    Format --> End([END])
+```
+
+### Agent State Schema
+```python
+class AgentState(TypedDict):
+    query: str
+    source_input: Optional[str]        # URL or filename/path
+    source_content: Optional[bytes]    # raw uploaded file content
+    product_id: Optional[str]
+    clarification_needed: bool
+    retrieved_chunks: list[dict]
+    sources: list[dict]
+    mode: Literal["qa", "troubleshoot"]
+    answer: str
+    steps: list[str]
+    content_changed: bool
+    version_info: Optional[str]
+    clarification_options: list[str]
+```
+
 ```

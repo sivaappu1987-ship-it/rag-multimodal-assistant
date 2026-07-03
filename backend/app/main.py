@@ -63,6 +63,18 @@ class TroubleshootRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=100)
     message: str = Field(..., min_length=1, max_length=4000)
 
+class AgentRequest(BaseModel):
+    query: str
+    source_input: Optional[str] = None
+
+class AgentResponse(BaseModel):
+    answer: str
+    steps: list[str] = []
+    sources: list[dict] = []
+    product_id: Optional[str] = None
+    clarification_needed: bool = False
+    version_info: Optional[str] = None
+
 # ─── LLM Helper ─────────────────────────────────────────────────────────────
 
 def call_llm(prompt: str) -> str:
@@ -290,3 +302,38 @@ async def troubleshoot(payload: TroubleshootRequest, request: Request):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/agent/run", response_model=AgentResponse)
+@limiter.limit("10/minute")
+async def agent_run(payload: AgentRequest, request: Request):
+    """
+    Unified Agentic Ingestion + Retrieval endpoint.
+    Scrapes web page or ingests file if provided, and performs grounded retrieval.
+    """
+    if is_prompt_injection(payload.query):
+        raise HTTPException(status_code=400, detail="Potential prompt injection detected.")
+        
+    inputs = {
+        "query": payload.query,
+        "source_input": payload.source_input,
+        "source_content": None,
+        "product_id": None,
+        "clarification_needed": False,
+        "retrieved_chunks": [],
+        "sources": [],
+        "mode": "qa",
+        "answer": "",
+        "steps": [],
+        "content_changed": False,
+        "version_info": None,
+        "clarification_options": []
+    }
+    
+    from app.services.agent_flow import agent_graph
+    try:
+        # Run graph synchronously
+        result = agent_graph.invoke(inputs)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent workflow execution failed: {str(e)}")

@@ -15,3 +15,6 @@ edge-tts
 langdetect
 httpx
 slowapi
+langgraph>=0.2.20
+langchain-core>=0.3.0
+beautifulsoup4
