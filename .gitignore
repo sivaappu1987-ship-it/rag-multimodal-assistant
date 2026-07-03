@@ -66,3 +66,7 @@ implementation_plan.md
 updated_spec.md
 test_agent.py
 docker_setup.md
+
+# Large package wheels (locally cached)
+backend/wheels/
+backend/test_wheels/

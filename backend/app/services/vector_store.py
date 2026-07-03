@@ -20,33 +20,39 @@ class VectorStoreService:
     _instance = None
 
     def __new__(cls):
-        # Singleton: share one in-memory client across the app
+        # Singleton: share one client across the app
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance.client = QdrantClient(":memory:")
+            from app.config import settings, BASE_DIR
+            import os
+            
+            db_path = settings.QDRANT_PATH
+            if not os.path.isabs(db_path):
+                db_path = str(BASE_DIR / db_path)
+            
+            cls._instance.client = QdrantClient(path=db_path)
             cls._instance._collection_ready = False
             cls._instance._vector_size = None
-            print("[VectorStore] In-memory Qdrant client initialized.")
+            print(f"[VectorStore] Persistent Qdrant client initialized at: {db_path}")
         return cls._instance
 
     def _ensure_collection(self, vector_size: int):
-        """Create the collection on first use with the correct vector dimensions."""
+        """Create the collection on first use if it does not already exist."""
         if not self._collection_ready:
-            # Delete if exists (handles server restarts in same process)
             existing = [c.name for c in self.client.get_collections().collections]
-            if QDRANT_COLLECTION in existing:
-                self.client.delete_collection(QDRANT_COLLECTION)
-
-            self.client.create_collection(
-                collection_name=QDRANT_COLLECTION,
-                vectors_config=VectorParams(
-                    size=vector_size,
-                    distance=Distance.COSINE,
-                ),
-            )
+            if QDRANT_COLLECTION not in existing:
+                self.client.create_collection(
+                    collection_name=QDRANT_COLLECTION,
+                    vectors_config=VectorParams(
+                        size=vector_size,
+                        distance=Distance.COSINE,
+                    ),
+                )
+                print(f"[VectorStore] Collection '{QDRANT_COLLECTION}' created (dim={vector_size}).")
+            else:
+                print(f"[VectorStore] Collection '{QDRANT_COLLECTION}' already exists. Reusing it.")
             self._collection_ready = True
             self._vector_size = vector_size
-            print(f"[VectorStore] Collection '{QDRANT_COLLECTION}' created (dim={vector_size}).")
 
     def ingest_chunks(self, chunks: list[dict]):
         """

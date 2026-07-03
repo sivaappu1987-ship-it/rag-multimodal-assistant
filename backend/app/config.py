@@ -30,6 +30,7 @@ class Settings:
 
     # --- Qdrant Vector Store ---
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "manuals")
+    QDRANT_PATH: str = os.getenv("QDRANT_PATH", "data_sandbox/qdrant_db")
 
     # --- RAG Parameters ---
     TOP_K: int = 5
@@ -59,6 +60,7 @@ LLM_PROVIDER = settings.LLM_PROVIDER
 LLM_MODEL = settings.LLM_MODEL
 EMBED_MODEL = settings.EMBED_MODEL
 QDRANT_COLLECTION = settings.QDRANT_COLLECTION
+QDRANT_PATH = settings.QDRANT_PATH
 TOP_K = settings.TOP_K
 SCORE_THRESHOLD = settings.SCORE_THRESHOLD
 CHUNK_SIZE = settings.CHUNK_SIZE
