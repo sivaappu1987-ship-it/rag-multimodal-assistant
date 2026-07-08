@@ -148,6 +148,7 @@ graph LR
     C -->|Check Text Size| D[Prompt Guard: Injection detection]
     D -->|Check override patterns| E[Context-Isolated Prompt Builder]
     E -->|Execute RAG| F[LLM Generation]
+```
 
 ---
 
@@ -196,6 +197,4 @@ class AgentState(TypedDict):
     content_changed: bool
     version_info: Optional[str]
     clarification_options: list[str]
-```
-
 ```
