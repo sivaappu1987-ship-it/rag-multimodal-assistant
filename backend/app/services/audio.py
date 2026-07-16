@@ -58,8 +58,11 @@ def convert_to_wav(input_path: str) -> str:
         f"transcoded_{os.path.basename(input_path)}.wav"
     )
 
+    import imageio_ffmpeg
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
     cmd = [
-        "ffmpeg",
+        ffmpeg_exe,
         "-y",
         "-i",
         input_path,

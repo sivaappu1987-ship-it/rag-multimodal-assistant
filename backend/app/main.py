@@ -39,10 +39,13 @@ parser_service = ParserService()
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     source_file: Optional[str] = None
+    session_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str] = []
+    needs_clarification: bool = False
+    clarification_question: Optional[str] = None
 
 class HealthResponse(BaseModel):
     status: str
@@ -66,6 +69,7 @@ class TroubleshootRequest(BaseModel):
 class AgentRequest(BaseModel):
     query: str
     source_input: Optional[str] = None
+    session_id: Optional[str] = None
 
 class AgentResponse(BaseModel):
     answer: str
@@ -74,6 +78,8 @@ class AgentResponse(BaseModel):
     product_id: Optional[str] = None
     clarification_needed: bool = False
     version_info: Optional[str] = None
+    clarification_question: Optional[str] = None
+    status: Optional[str] = None
 
 # ─── LLM Helper ─────────────────────────────────────────────────────────────
 
@@ -147,34 +153,175 @@ def get_products():
         raise HTTPException(status_code=500, detail=f"Failed to list products: {str(e)}")
 
 
+def build_clarification_from_ambiguity(raw: str) -> str:
+    """
+    Validates an LLM-produced ambiguity string before serving it to the user.
+    Falls back to a constructed generic-but-topic-aware question if the
+    raw string doesn't look like a real question.
+    """
+    if not raw or not isinstance(raw, str):
+        return "Could you clarify what you're referring to?"
+
+    cleaned = raw.strip()
+
+    # Minimum sanity checks — not full NLP validation, just guard against
+    # empty strings, junk tokens, or non-question fragments.
+    if len(cleaned) < 10:
+        return "Could you clarify what you're referring to?"
+    if not cleaned.endswith("?"):
+        # Doesn't look like a question — still usable as context, but
+        # wrap it rather than serve it raw.
+        return f"Could you clarify: {cleaned}"
+
+    return cleaned
+
+
 @app.post("/chat", response_model=ChatResponse)
 @limiter.limit("20/minute")
 async def chat(payload: ChatRequest, request: Request):
     """
-    RAG chat endpoint:
-      1. Protect against prompt injection
-      2. Retrieve relevant chunks from Qdrant
-      3. If no chunks found → return safe fallback
-      4. Build grounded prompt
-      5. Call LLM
-      6. Return answer + unique source files
+    Phase 1 & 2 RAG chat endpoint with Query Understanding, Relevance Guard, and Stateful Clarification.
     """
     if is_prompt_injection(payload.message):
         raise HTTPException(status_code=400, detail="Potential prompt injection detected.")
 
+    from app.config import MAX_CLARIFICATION_ATTEMPTS
+    session_id = payload.session_id
+    if not session_id:
+        import uuid
+        session_id = str(uuid.uuid4())
+
+    from app.services.session_store import SessionStore
+    session_store = SessionStore()
+    session = session_store.get(session_id)
+
+    user_message = payload.message
+
+    # --- Phase 2: Context Reconstruction ---
+    if session.get("pending_clarification"):
+        session["clarification_attempts"] = session.get("clarification_attempts", 0) + 1
+        if session["clarification_attempts"] > MAX_CLARIFICATION_ATTEMPTS:
+            session["pending_clarification"] = False
+            session["clarification_attempts"] = 0
+            session_store.save(session_id, session)
+            return ChatResponse(
+                answer="I'm still having trouble understanding. Could you please state the product model and the issue you're facing in one complete sentence?",
+                sources=[],
+                needs_clarification=False
+            )
+        
+        from app.services.context_reconstruction import reconstruct_query
+        resolved_query, res_conf = reconstruct_query(
+            original_query=session.get("last_valid_user_query", ""),
+            clarification_question=session.get("clarification_question", ""),
+            user_followup=user_message,
+            product_hint=session.get("product")
+        )
+
+        if is_prompt_injection(resolved_query):
+            raise HTTPException(status_code=400, detail="Potential prompt injection detected in reconstructed query.")
+
+        if res_conf == "LOW":
+            # If the follow-up makes no sense, trigger another clarification immediately
+            session_store.save(session_id, session)
+            return ChatResponse(
+                answer=f"I didn't quite catch that. {session.get('clarification_question', 'Could you clarify?')}",
+                sources=[],
+                needs_clarification=True,
+                clarification_question=session.get("clarification_question")
+            )
+
+        # Replace user_message with the semantically resolved query
+        user_message = resolved_query
+        session["pending_clarification"] = False
+        session["clarification_attempts"] = 0
+
     fallback = "I could not find that information in the uploaded manuals."
 
-    # Step 1: Retrieve context
-    chunks = retrieve_context(payload.message, source_file=payload.source_file)
+    from app.services.query_understanding import understand_query
+    understood = understand_query(user_message)
+    input_confidence = understood.get("input_confidence", "LOW")
 
-    # Step 2: Fallback if nothing retrieved
-    if not chunks:
-        return ChatResponse(answer=fallback, sources=[])
+    # Step 1 & 2: Route on input_confidence
+    if input_confidence == "LOW":
+        product_hint = understood.get("product_hint")
+        issue_hint = understood.get("issue_hint")
+        ambiguities = understood.get("ambiguities", [])
+        
+        if product_hint and issue_hint:
+            clarification_q = f"I see this is about the {product_hint} and a {issue_hint} issue — can you tell me a bit more about what's happening?"
+        elif product_hint and not issue_hint:
+            clarification_q = f"I see this is about the {product_hint} — what's happening with it?"
+        elif issue_hint and not product_hint:
+            clarification_q = f"Which product is having this {issue_hint} issue?"
+        elif ambiguities and isinstance(ambiguities, list) and len(ambiguities) > 0:
+            clarification_q = build_clarification_from_ambiguity(ambiguities[0])
+        else:
+            clarification_q = "Could you tell me more about what you need help with?"
 
-    # Step 3: Build prompt
-    prompt = build_prompt(chunks, payload.message)
+        session["last_valid_user_query"] = user_message
+        session["pending_clarification"] = True
+        session["clarification_question"] = clarification_q
+        session_store.save(session_id, session)
 
-    # Step 4: Call LLM
+        return ChatResponse(
+            answer=clarification_q,
+            sources=[],
+            needs_clarification=True,
+            clarification_question=clarification_q
+        )
+    elif input_confidence == "MEDIUM":
+        ambiguities = understood.get("ambiguities", [])
+        if ambiguities and isinstance(ambiguities, list) and len(ambiguities) > 0:
+            clarification_q = build_clarification_from_ambiguity(ambiguities[0])
+            session["last_valid_user_query"] = user_message
+            session["pending_clarification"] = True
+            session["clarification_question"] = clarification_q
+            session_store.save(session_id, session)
+            return ChatResponse(
+                answer=clarification_q,
+                sources=[],
+                needs_clarification=True,
+                clarification_question=clarification_q
+            )
+        # Else proceed to retrieval
+        
+    # Step 3: Retrieval
+    chunks, retrieval_confidence = retrieve_context(
+        understood["normalized_query"],
+        source_file=payload.source_file,
+        query_entities=understood["entities"]
+    )
+
+    # Step 4: Route on retrieval_confidence
+    if retrieval_confidence == "LOW":
+        # Extend fallback for LOW relevance or zero results
+        low_fallback = fallback + " The query might be too vague or unrelated to the manuals."
+        return ChatResponse(answer=low_fallback, sources=[])
+        
+    elif retrieval_confidence == "MEDIUM":
+        # Check product match if hint provided
+        product_hint = understood.get("product_hint")
+        if product_hint and chunks:
+            top_chunk_product = chunks[0].get("product", "")
+            if top_chunk_product and product_hint.lower() not in top_chunk_product.lower():
+                # Ask clarifying question if product mismatch
+                clarification_q = f"I found some information for {top_chunk_product}, but you asked about {product_hint}. Should I proceed with the details for {top_chunk_product}?"
+                return ChatResponse(
+                    answer=clarification_q,
+                    sources=[],
+                    needs_clarification=True,
+                    clarification_question=clarification_q
+                )
+        
+        # Build prompt instructing to hedge
+        base_prompt = build_prompt(chunks, payload.message)
+        prompt = base_prompt + "\n\nNote: The context provided may only partially cover the question. Please hedge your answer and note any uncertainty."
+    else:
+        # HIGH confidence
+        prompt = build_prompt(chunks, payload.message)
+
+    # Step 5: Call LLM
     try:
         answer = call_llm(prompt)
     except RuntimeError as e:
@@ -182,13 +329,18 @@ async def chat(payload: ChatRequest, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM call failed: {str(e)}")
 
-    # Step 5: Collect unique sources
+    # Collect unique sources
     normalized_answer = answer.strip().rstrip(".").lower()
     normalized_fallback = fallback.strip().rstrip(".").lower()
-    if normalized_answer == normalized_fallback:
+    if normalized_answer == normalized_fallback or normalized_answer.startswith("i could not find"):
         sources = []
     else:
         sources = list(dict.fromkeys(c["source"] for c in chunks))
+
+    # Successful turn, save product state if extracted
+    if understood.get("product_hint"):
+        session["product"] = understood.get("product_hint")
+    session_store.save(session_id, session)
 
     return ChatResponse(answer=answer, sources=sources)
 
@@ -316,6 +468,11 @@ async def agent_run(payload: AgentRequest, request: Request):
     if is_prompt_injection(payload.query):
         raise HTTPException(status_code=400, detail="Potential prompt injection detected.")
         
+    session_id = payload.session_id
+    if not session_id:
+        import uuid
+        session_id = str(uuid.uuid4())
+        
     inputs = {
         "query": payload.query,
         "source_input": payload.source_input,
@@ -329,7 +486,15 @@ async def agent_run(payload: AgentRequest, request: Request):
         "steps": [],
         "content_changed": False,
         "version_info": None,
-        "clarification_options": []
+        "clarification_options": [],
+        "session_id": session_id,
+        "input_confidence": "LOW",
+        "retrieval_confidence": "LOW",
+        "clarification_question": None,
+        "clarification_attempts": 0,
+        "resolved_query": None,
+        "retrieval_retries": 0,
+        "understood_data": {}
     }
     
     from app.services.agent_flow import agent_graph

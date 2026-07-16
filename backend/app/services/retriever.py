@@ -1,17 +1,17 @@
-from typing import Optional
+from typing import Optional, Tuple, List, Dict, Any
 from app.services.embedder import EmbedderService
 from app.services.vector_store import VectorStoreService
 from app.services.hybrid_search import BM25, rrf_merge
 from app.services.metadata_resolver import resolve_metadata_filter
 from app.services.product_identifier import identify_product
-from app.config import TOP_K, SCORE_THRESHOLD
+from app.config import TOP_K, SCORE_THRESHOLD, RRF_HIGH_THRESHOLD, RRF_LOW_THRESHOLD
 
 
 def retrieve_context(
     query: str, 
     source_file: Optional[str] = None,
     query_entities: Optional[dict] = None
-) -> list[dict]:
+) -> Tuple[List[Dict[str, Any]], str]:
     """
     Retrieve relevant chunks from Qdrant using hierarchical hybrid search:
       - Level 1: Exact product/model match filter
@@ -90,9 +90,17 @@ def retrieve_context(
         # Return results if any are found at this hierarchy level
         if merged_results:
             print(f"[Retriever] Found {len(merged_results)} chunks at retrieval Level {level} (filter: {q_filter is not None}).")
-            return merged_results
+            top_rrf_score = merged_results[0].get("rrf_score", 0.0)
+            print(f"[Retriever] Top RRF score: {top_rrf_score}")
+            if top_rrf_score >= RRF_HIGH_THRESHOLD:
+                retrieval_confidence = "HIGH"
+            elif top_rrf_score >= RRF_LOW_THRESHOLD:
+                retrieval_confidence = "MEDIUM"
+            else:
+                retrieval_confidence = "LOW"
+            return merged_results, retrieval_confidence
 
     # Return empty if nothing passes score threshold across all levels
-    return []
+    return [], "LOW"
 
 

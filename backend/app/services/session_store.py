@@ -28,6 +28,16 @@ class SessionStore:
                 "status": "START",
                 "history": [],
                 "context": [],
+                # Phase 2 Additions
+                "last_valid_user_query": None,
+                "last_normalized_query": None,
+                "pending_clarification": False,
+                "clarification_question": None,
+                "clarification_context": None,
+                "clarification_attempts": 0,
+                "last_valid_response": None,
+                "input_confidence": None,
+                "retrieval_confidence": None,
             }
         return self.sessions[session_id].copy()
 

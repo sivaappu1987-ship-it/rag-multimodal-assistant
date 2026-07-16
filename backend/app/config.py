@@ -35,10 +35,16 @@ class Settings:
     # --- RAG Parameters ---
     TOP_K: int = 5
     SCORE_THRESHOLD: float = 0.0
+    RRF_HIGH_THRESHOLD: float = 0.025  # Matches well in both dense and sparse or top 1
+    RRF_LOW_THRESHOLD: float = 0.015   # Below this means it's ranked low in just one list
 
     # --- Chunking ---
     CHUNK_SIZE: int = 500
     CHUNK_OVERLAP: int = 100
+
+    # --- Phase 2 Limits ---
+    MAX_CLARIFICATION_ATTEMPTS: int = 2
+    MAX_RETRIEVAL_RETRIES: int = 1
 
     def __init__(self):
         # Auto-detect which provider to use (Groq preferred)
@@ -63,6 +69,10 @@ QDRANT_COLLECTION = settings.QDRANT_COLLECTION
 QDRANT_PATH = settings.QDRANT_PATH
 TOP_K = settings.TOP_K
 SCORE_THRESHOLD = settings.SCORE_THRESHOLD
+RRF_HIGH_THRESHOLD = settings.RRF_HIGH_THRESHOLD
+RRF_LOW_THRESHOLD = settings.RRF_LOW_THRESHOLD
 CHUNK_SIZE = settings.CHUNK_SIZE
 CHUNK_OVERLAP = settings.CHUNK_OVERLAP
+MAX_CLARIFICATION_ATTEMPTS = settings.MAX_CLARIFICATION_ATTEMPTS
+MAX_RETRIEVAL_RETRIES = settings.MAX_RETRIEVAL_RETRIES
 

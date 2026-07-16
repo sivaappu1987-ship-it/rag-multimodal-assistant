@@ -13,12 +13,16 @@ from typing import TypedDict, Optional, List, Dict, Any, Literal
 from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
-from app.config import settings
+from app.config import settings, MAX_CLARIFICATION_ATTEMPTS, MAX_RETRIEVAL_RETRIES
 from app.services.product_identifier import identify_product as identify_product_service
 from app.services.chunker import chunk_markdown
 from app.services.embedder import EmbedderService
 from app.services.vector_store import VectorStoreService
 from app.services.retriever import retrieve_context as retrieve_context_service
+from app.services.session_store import SessionStore
+from app.services.query_understanding import understand_query
+from app.services.context_reconstruction import reconstruct_query
+from app.main import build_clarification_from_ambiguity, call_llm
 from langgraph.graph import StateGraph, END
 
 # --- SQLite Version Cache Registry ---
@@ -56,6 +60,16 @@ class AgentState(TypedDict):
     content_changed: bool
     version_info: Optional[str]
     clarification_options: Optional[List[str]]
+    # Phase 2 fields
+    session_id: Optional[str]
+    input_confidence: str
+    retrieval_confidence: str
+    clarification_question: Optional[str]
+    clarification_attempts: int
+    resolved_query: Optional[str]
+    retrieval_retries: int
+    understood_data: Dict[str, Any]
+    status: Optional[str]
 
 # --- Graph Nodes ---
 
@@ -189,6 +203,10 @@ def embed_and_store(state: AgentState) -> Dict[str, Any]:
     return {}
 
 def identify_product(state: AgentState) -> Dict[str, Any]:
+    understood = state.get("understood_data", {})
+    if understood.get("product_hint"):
+        return {"product_id": understood.get("product_hint"), "clarification_needed": False}
+
     query = state["query"]
     vs = VectorStoreService()
     existing_products = vs.get_unique_products()
@@ -231,6 +249,131 @@ def identify_product(state: AgentState) -> Dict[str, Any]:
 
     return {"product_id": None, "clarification_needed": False}
 
+
+def check_clarification_node(state: AgentState) -> Dict[str, Any]:
+    session_id = state.get("session_id")
+    if not session_id:
+        return {"clarification_needed": False}
+        
+    store = SessionStore()
+    session = store.get(session_id)
+    return {
+        "clarification_needed": session.get("pending_clarification", False)
+    }
+
+def reconstruct_context_node(state: AgentState) -> Dict[str, Any]:
+    session_id = state["session_id"]
+    store = SessionStore()
+    session = store.get(session_id)
+    
+    attempts = session.get("clarification_attempts", 0) + 1
+    session["clarification_attempts"] = attempts
+    store.save(session_id, session)
+    
+    if attempts > MAX_CLARIFICATION_ATTEMPTS:
+        session["pending_clarification"] = False
+        session["clarification_attempts"] = 0
+        store.save(session_id, session)
+        return {
+            "answer": "I'm still having trouble understanding. Could you please state the product model and the issue you're facing in one complete sentence?",
+            "clarification_needed": False,
+            "resolved_query": None,
+            "input_confidence": "LOW"
+        }
+        
+    resolved_query, res_conf = reconstruct_query(
+        session.get("last_valid_user_query", ""),
+        session.get("clarification_question", ""),
+        state["query"],
+        session.get("product")
+    )
+    
+    if res_conf == "LOW":
+        return {
+            "resolved_query": None,
+            "input_confidence": "LOW"
+        }
+        
+    session["pending_clarification"] = False
+    session["clarification_attempts"] = 0
+    store.save(session_id, session)
+    
+    return {
+        "resolved_query": resolved_query,
+        "query": resolved_query
+    }
+
+def analyze_input_node(state: AgentState) -> Dict[str, Any]:
+    query_to_analyze = state.get("resolved_query") or state["query"]
+    understood = understand_query(query_to_analyze)
+    return {
+        "input_confidence": understood.get("input_confidence", "LOW"),
+        "understood_data": understood,
+        "query": understood.get("normalized_query", query_to_analyze)
+    }
+
+def clarify_or_fallback_node(state: AgentState) -> Dict[str, Any]:
+    session_id = state.get("session_id")
+    store = SessionStore()
+    session = store.get(session_id) if session_id else {}
+    
+    input_conf = state.get("input_confidence", "LOW")
+    understood = state.get("understood_data", {})
+    
+    if input_conf == "MEDIUM":
+        ambiguities = understood.get("ambiguities", [])
+        if ambiguities and isinstance(ambiguities, list) and len(ambiguities) > 0:
+            clarification_q = build_clarification_from_ambiguity(ambiguities[0])
+            if session_id:
+                session["last_valid_user_query"] = state["query"]
+                session["pending_clarification"] = True
+                session["clarification_question"] = clarification_q
+                store.save(session_id, session)
+            return {
+                "clarification_needed": True,
+                "clarification_question": clarification_q,
+                "answer": clarification_q
+            }
+            
+    # LOW or fallback
+    product_hint = understood.get("product_hint")
+    issue_hint = understood.get("issue_hint")
+    ambiguities = understood.get("ambiguities", [])
+    
+    if product_hint and issue_hint:
+        clarification_q = f"I see this is about the {product_hint} and a {issue_hint} issue — can you tell me a bit more about what's happening?"
+    elif product_hint and not issue_hint:
+        clarification_q = f"I see this is about the {product_hint} — what's happening with it?"
+    elif issue_hint and not product_hint:
+        clarification_q = f"Which product is having this {issue_hint} issue?"
+    elif ambiguities and isinstance(ambiguities, list) and len(ambiguities) > 0:
+        clarification_q = build_clarification_from_ambiguity(ambiguities[0])
+    else:
+        # If we got here from retrieval failure
+        if state.get("retrieval_confidence") == "LOW":
+            return {
+                "clarification_needed": False,
+                "answer": "I could not find that information in the uploaded manuals. The query might be too vague or unrelated to the manuals."
+            }
+        clarification_q = "Could you tell me more about what you need help with?"
+
+    if session_id:
+        session["last_valid_user_query"] = state["query"]
+        session["pending_clarification"] = True
+        session["clarification_question"] = clarification_q
+        store.save(session_id, session)
+
+    return {
+        "clarification_needed": True,
+        "clarification_question": clarification_q,
+        "answer": clarification_q
+    }
+
+def retry_retrieval_node(state: AgentState) -> Dict[str, Any]:
+    return {
+        "retrieval_retries": state.get("retrieval_retries", 0) + 1
+    }
+
 def classify_mode(state: AgentState) -> Dict[str, Any]:
     query = state["query"].lower()
 
@@ -242,7 +385,7 @@ def classify_mode(state: AgentState) -> Dict[str, Any]:
         return {"mode": "troubleshoot"}
 
     from app.config import settings
-    from app.main import call_llm
+    
 
     if settings.LLM_PROVIDER != "none":
         prompt = f"""Classify the user's technical support query.
@@ -261,12 +404,16 @@ Respond with either 'troubleshoot' (if reporting a problem, error, or failure) o
 def retrieve(state: AgentState) -> Dict[str, Any]:
     query = state["query"]
     product_id = state["product_id"]
+    
+    if state.get("retrieval_retries", 0) > 0:
+        understood = state.get("understood_data", {})
+        query = f"{query} {understood.get('product_hint', '')} {understood.get('issue_hint', '')}".strip()
 
     query_entities = {}
     if product_id:
         query_entities = {"product": product_id, "model": product_id}
 
-    chunks = retrieve_context_service(query, query_entities=query_entities)
+    chunks, retrieval_confidence = retrieve_context_service(query, query_entities=query_entities)
 
     sources = []
     for c in chunks:
@@ -286,7 +433,8 @@ def retrieve(state: AgentState) -> Dict[str, Any]:
 
     return {
         "retrieved_chunks": chunks,
-        "sources": unique_sources
+        "sources": unique_sources,
+        "retrieval_confidence": retrieval_confidence
     }
 
 def generate(state: AgentState) -> Dict[str, Any]:
@@ -298,15 +446,19 @@ def generate(state: AgentState) -> Dict[str, Any]:
         return {"answer": "I could not find that information in the uploaded manuals."}
 
     context_str = "\n\n".join([f"--- Source: {c['source']} (Page {c.get('page')}) ---\n{c['content']}" for c in chunks])
-    from app.main import call_llm
+    
+    hedge_note = ""
+    if state.get("retrieval_confidence") == "MEDIUM":
+        hedge_note = "\n\nNote: The context provided may only partially cover the question. Please hedge your answer and note any uncertainty."
+
+    
 
     if mode == "qa":
         prompt = f"""You are a technical support assistant. Answer the user's question using only the provided context. If the answer cannot be found in the context, say "I could not find that information in the uploaded manuals."
 Context:
 {context_str}
 
-User Question: {query}
-Answer:"""
+User Question: {query}\nAnswer:""" + hedge_note
         answer = call_llm(prompt)
         return {"answer": answer}
     else:
@@ -325,7 +477,7 @@ Return only valid JSON. Do not write any markdown, backticks, or other text outs
 Context:
 {context_str}
 
-User Query: {query}"""
+User Query: {query}""" + hedge_note
         response_text = call_llm(prompt)
         cleaned_text = response_text.replace("```json", "").replace("```", "").strip()
 
@@ -340,23 +492,33 @@ User Query: {query}"""
             return {"answer": response_text, "steps": []}
 
 def format_response(state: AgentState) -> Dict[str, Any]:
-    if state.get("clarification_needed"):
+    clarification_needed = state.get("clarification_needed", False)
+    if state.get("clarification_options"):
         options = state.get("clarification_options", [])
         options_str = ", ".join(options)
         return {
             "answer": f"I detected multiple products matching your request: {options_str}. Please specify which product model you are asking about.",
             "steps": [],
             "sources": [],
-            "clarification_needed": True
+            "clarification_needed": True,
+            "status": "needs_clarification"
         }
+
+    status = "answered"
+    if clarification_needed:
+        status = "needs_clarification"
+    elif state.get("retrieval_confidence") == "LOW":
+        status = "fallback" if "could not find" in state.get("answer", "").lower() else "low_relevance"
 
     return {
         "answer": state["answer"],
         "steps": state.get("steps") or [],
         "sources": state.get("sources") or [],
         "product_id": state.get("product_id"),
-        "clarification_needed": False,
-        "version_info": state.get("version_info")
+        "clarification_needed": clarification_needed,
+        "version_info": state.get("version_info"),
+        "clarification_question": state.get("clarification_question"),
+        "status": status
     }
 
 # --- Graph Assembly ---
@@ -369,16 +531,34 @@ def ingest_router(state: AgentState) -> str:
         else:
             return "file_ingest"
     else:
-        return "identify_product"
+        return "check_clarification_node"
 
 def version_router(state: AgentState) -> str:
     if state["content_changed"]:
         return "embed_and_store"
     else:
+        return "check_clarification_node"
+        
+def pending_router(state: AgentState) -> str:
+    if state.get("clarification_needed"):
+        return "reconstruct_context_node"
+    return "analyze_input_node"
+    
+def input_confidence_router(state: AgentState) -> str:
+    if state.get("input_confidence") == "HIGH":
         return "identify_product"
+    return "clarify_or_fallback_node"
+    
+def retrieval_confidence_router(state: AgentState) -> str:
+    conf = state.get("retrieval_confidence", "LOW")
+    if conf in ["HIGH", "MEDIUM"]:
+        return "generate"
+    if state.get("retrieval_retries", 0) < MAX_RETRIEVAL_RETRIES:
+        return "retry_retrieval_node"
+    return "clarify_or_fallback_node"
 
 def product_router(state: AgentState) -> str:
-    if state["clarification_needed"]:
+    if state.get("clarification_needed"):
         return "format_response"
     else:
         return "classify_mode"
@@ -390,6 +570,13 @@ def build_agent_graph():
     workflow.add_node("file_ingest", file_ingest)
     workflow.add_node("version_check", version_check)
     workflow.add_node("embed_and_store", embed_and_store)
+    
+    workflow.add_node("check_clarification_node", check_clarification_node)
+    workflow.add_node("reconstruct_context_node", reconstruct_context_node)
+    workflow.add_node("analyze_input_node", analyze_input_node)
+    workflow.add_node("clarify_or_fallback_node", clarify_or_fallback_node)
+    workflow.add_node("retry_retrieval_node", retry_retrieval_node)
+    
     workflow.add_node("identify_product", identify_product)
     workflow.add_node("classify_mode", classify_mode)
     workflow.add_node("retrieve", retrieve)
@@ -401,7 +588,7 @@ def build_agent_graph():
         {
             "url_ingest": "url_ingest",
             "file_ingest": "file_ingest",
-            "identify_product": "identify_product"
+            "check_clarification_node": "check_clarification_node"
         }
     )
 
@@ -413,11 +600,31 @@ def build_agent_graph():
         version_router,
         {
             "embed_and_store": "embed_and_store",
-            "identify_product": "identify_product"
+            "check_clarification_node": "check_clarification_node"
         }
     )
 
-    workflow.add_edge("embed_and_store", "identify_product")
+    workflow.add_edge("embed_and_store", "check_clarification_node")
+
+    workflow.add_conditional_edges(
+        "check_clarification_node",
+        pending_router,
+        {
+            "reconstruct_context_node": "reconstruct_context_node",
+            "analyze_input_node": "analyze_input_node"
+        }
+    )
+    
+    workflow.add_edge("reconstruct_context_node", "analyze_input_node")
+    
+    workflow.add_conditional_edges(
+        "analyze_input_node",
+        input_confidence_router,
+        {
+            "identify_product": "identify_product",
+            "clarify_or_fallback_node": "clarify_or_fallback_node"
+        }
+    )
 
     workflow.add_conditional_edges(
         "identify_product",
@@ -429,7 +636,20 @@ def build_agent_graph():
     )
 
     workflow.add_edge("classify_mode", "retrieve")
-    workflow.add_edge("retrieve", "generate")
+    
+    workflow.add_conditional_edges(
+        "retrieve",
+        retrieval_confidence_router,
+        {
+            "generate": "generate",
+            "retry_retrieval_node": "retry_retrieval_node",
+            "clarify_or_fallback_node": "clarify_or_fallback_node"
+        }
+    )
+    
+    workflow.add_edge("retry_retrieval_node", "retrieve")
+    workflow.add_edge("clarify_or_fallback_node", "format_response")
+
     workflow.add_edge("generate", "format_response")
     workflow.add_edge("format_response", END)
 
